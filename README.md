@@ -33,3 +33,11 @@ time ./calculate_average_baseline.sh
 ### Naive scoped threads with 500 MiB mmap regions 
 
 7. 07.41user 4.51system 0:23.52elapsed
+
+### Rayon map-reduce in region and post-processing (calc of min/mean/max)
+
+8. 136.67user 11.61system 0:15.28elapsed 
+
+### Same as above but avoid floats for everything but mean
+
+9. 110.37user 8.17system 0:11.02elapsed

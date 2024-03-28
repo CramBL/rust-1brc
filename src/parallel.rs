@@ -1,6 +1,7 @@
 #![allow(unused_imports, dead_code)]
 
 use crate::util::*;
+use rayon::prelude::*;
 
 #[inline(always)]
 fn configured_mmap_read() -> Mmap {
@@ -15,11 +16,12 @@ fn configured_mmap_read() -> Mmap {
 
 #[inline(always)]
 fn divide_mmap_regions(mmap: &Mmap) -> Vec<(usize, usize)> {
-    const REGION_SIZE: usize = 1024 * 1024 * 128;
+    const REGION_SIZE: usize = 1024 * 1024 * 64;
     let (mut start, mut end) = (0, REGION_SIZE);
-    let mut regions = Vec::with_capacity(20);
-
     let end_mmap = mmap.len();
+
+    let mut regions = Vec::with_capacity(100);
+
     while end < end_mmap - 1 {
         end = if end + REGION_SIZE >= end_mmap {
             let end = end_mmap - 1;
@@ -41,6 +43,7 @@ fn divide_mmap_regions(mmap: &Mmap) -> Vec<(usize, usize)> {
     regions
 }
 
+#[inline(always)]
 fn region_worker(region: &[u8]) -> Vec<Vec<([u8; 101], Vec<[u8; 6]>)>> {
     let mut city_start_letters: Vec<u8> = Vec::with_capacity(500);
 
@@ -116,71 +119,41 @@ pub fn do_work() {
     let regions = divide_mmap_regions(&contents);
     let mut step_time = print_progress_timing("regions divided", step_time, total_time);
 
-    let mut city_start_letters: Vec<u8> = Vec::with_capacity(500);
-
-    let mut city_temps: Vec<Vec<([u8; 101], Vec<[u8; 6]>)>> = Vec::with_capacity(500);
-
-    use std::thread;
-    let city_temps_region = thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(regions.len());
-        for region in regions {
-            let (start, end) = region;
-            let contents = &contents[start..end];
-            let handle = scope.spawn(|| region_worker(contents));
-            handles.push(handle);
-        }
-        let step_time = print_progress_timing(
-            &format!("Created {} threads", handles.len()),
-            step_time,
-            total_time,
+    let city_temps: Vec<Vec<([u8; 101], Vec<[u8; 6]>)>> = regions
+        .par_iter()
+        .map(|(start, end)| {
+            let region = &contents[*start..=*end];
+            region_worker(region)
+        })
+        .reduce(
+            || Vec::with_capacity(500),
+            |mut acc, city_temps_region| {
+                city_temps_region
+                    .into_iter()
+                    .for_each(|city_start_letter_vec| {
+                        // Find if the city start letter is already in the city_start_letters
+                        let city_start_letter = city_start_letter_vec[0].0[0];
+                        let city_temps_idx =
+                            acc.iter().position(|x| x[0].0[0] == city_start_letter);
+                        if let Some(city_temps_idx) = city_temps_idx {
+                            city_start_letter_vec.into_iter().for_each(|(name, temps)| {
+                                let existing_pos = acc[city_temps_idx]
+                                    .iter()
+                                    .position(|(name_, _)| name_ == &name);
+                                if let Some(existing_pos) = existing_pos {
+                                    acc[city_temps_idx][existing_pos].1.extend(temps);
+                                } else {
+                                    acc[city_temps_idx].push((name, temps));
+                                }
+                            });
+                        } else {
+                            acc.push(city_start_letter_vec);
+                        }
+                    });
+                acc
+            },
         );
 
-        let mut city_temps_region: Vec<Vec<([u8; 101], Vec<[u8; 6]>)>> = Vec::with_capacity(500);
-
-        for handle in handles {
-            let city_temps_region_part = handle.join().unwrap();
-            city_temps_region.extend(city_temps_region_part);
-        }
-
-        let _ = print_progress_timing(
-            &format!(
-                "Joined all threads, {} city_temps_regions",
-                city_temps_region.len()
-            ),
-            step_time,
-            total_time,
-        );
-
-        city_temps_region
-    });
-
-    let mut step_time =
-        print_progress_timing("Continuing to aggregate all results", step_time, total_time);
-
-    city_temps_region
-        .into_iter()
-        .for_each(|city_start_letter_vec| {
-            // Find if the city start letter is already in the city_start_letters
-            let city_start_letter = city_start_letter_vec[0].0[0];
-            let city_temps_idx = city_start_letters
-                .iter()
-                .position(|&x| x == city_start_letter);
-            if let Some(city_temps_idx) = city_temps_idx {
-                city_start_letter_vec.into_iter().for_each(|(name, temps)| {
-                    let existing_pos = city_temps[city_temps_idx]
-                        .iter()
-                        .position(|(name_, _)| name_ == &name);
-                    if let Some(existing_pos) = existing_pos {
-                        city_temps[city_temps_idx][existing_pos].1.extend(temps);
-                    } else {
-                        city_temps[city_temps_idx].push((name, temps));
-                    }
-                });
-            } else {
-                city_start_letters.push(city_start_letter);
-                city_temps.push(city_start_letter_vec);
-            }
-        });
     step_time = print_progress_timing("Aggregated region data", step_time, total_time);
     let processing_data_time = step_time.elapsed();
     let step_time = print_progress_timing("processed all data", step_time, total_time);
@@ -194,20 +167,28 @@ pub fn do_work() {
     }
     println!("Number of cities: {city_count}");
 
-    // Sort the city names alphabetically
-    city_temps.sort_by(|a, b| a[0].0.cmp(&b[0].0));
+    //let results = par_calc_temps(city_temps);
+    let mut results = par_calc_temps_to_str(city_temps);
 
-    let results = calc_temps(city_temps);
+    // Sort the city names alphabetically
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+
     let post_processing_time = step_time.elapsed();
     let step_time = print_progress_timing("Post processing city temps done", step_time, total_time);
 
-    final_print(results);
+    //final_print(results);
+    //final_print_str(results);
+
+    let out_str = final_build_str(results);
+    println!("{out_str}");
 
     let _ = print_progress_timing("final print done", step_time, total_time);
 
     println!("==\n== total time elapsed: {:?} ==", total_time.elapsed());
     println!("--> Processing data: {processing_data_time:?}");
     println!("--> Post processing: {post_processing_time:?}");
+
+    std::fs::write("out.txt", out_str).unwrap();
 }
 
 fn final_print(results: Vec<(Box<str>, f32, f32, f32)>) {
@@ -225,6 +206,24 @@ fn final_print(results: Vec<(Box<str>, f32, f32, f32)>) {
         remaining_cnt -= 1;
     }
     println!("}}");
+}
+
+#[inline(always)]
+pub fn par_calc_temps(
+    city_temps: Vec<Vec<([u8; 101], Vec<[u8; 6]>)>>,
+) -> Vec<(Box<str>, f32, f32, f32)> {
+    let final_city_temps = city_temps
+        .into_par_iter()
+        .map(|name_temp_vec| calc_city_temp_vec(name_temp_vec))
+        .reduce(
+            || Vec::with_capacity(500),
+            |mut acc, city_temps| {
+                acc.extend(city_temps);
+                acc
+            },
+        );
+
+    final_city_temps
 }
 
 #[inline(always)]
@@ -265,8 +264,9 @@ pub fn calc_city_temp_vec(
 #[inline(always)]
 pub fn calc_min_mean_max_temps_alt(temps: Vec<[u8; 6]>) -> (f32, f32, f32) {
     let total_elements = temps.len();
-    let mut min_temp = f32::MAX;
-    let mut max_temp = f32::MIN;
+
+    let mut min_temp = 99.9;
+    let mut max_temp = -99.9;
     let mut sum_temp = 0.0;
 
     for temp in temps {
@@ -288,4 +288,167 @@ pub fn calc_min_mean_max_temps_alt(temps: Vec<[u8; 6]>) -> (f32, f32, f32) {
 
     let mean_temp = sum_temp / total_elements as f32;
     (min_temp, mean_temp, max_temp)
+}
+
+fn final_print_str(results: Vec<(String, String, String, String)>) {
+    let mut remaining_cnt = results.len();
+
+    print!("{{");
+    for (name, min, mean, max) in results {
+        print!("{name}=");
+
+        print!("{min}/{mean}/{max}");
+
+        if remaining_cnt > 1 {
+            print!(", ");
+        }
+        remaining_cnt -= 1;
+    }
+    println!("}}");
+}
+
+fn final_build_str(results: Vec<(String, String, String, String)>) -> String {
+    let mut remaining_cnt = results.len();
+
+    let mut out_str = String::with_capacity(10000);
+    out_str.push('{');
+    for (name, min, mean, max) in results {
+        out_str.push_str(&name);
+        out_str.push('=');
+
+        out_str.push_str(&min);
+        out_str.push('/');
+        out_str.push_str(&mean);
+        out_str.push('/');
+        out_str.push_str(&max);
+
+        if remaining_cnt > 1 {
+            out_str.push_str(", ");
+        }
+        remaining_cnt -= 1;
+    }
+    out_str.push('}');
+
+    out_str
+}
+
+#[inline(always)]
+pub fn par_calc_temps_to_str(
+    city_temps: Vec<Vec<([u8; 101], Vec<[u8; 6]>)>>,
+) -> Vec<(String, String, String, String)> {
+    let final_city_temps = city_temps
+        .into_par_iter()
+        .map(|name_temp_vec| {
+            name_temp_vec
+                .into_iter()
+                .map(|(name, temps)| {
+                    let (min, mean, max) = calc_min_mean_max_to_str(temps);
+                    let name = unsafe {
+                        let name_slice = &name[0..=*name.get_unchecked(100) as usize];
+                        String::from_utf8_unchecked(name_slice.to_vec())
+                    };
+                    (name, min, mean, max)
+                })
+                .collect::<Vec<(String, String, String, String)>>()
+        })
+        .reduce(
+            || Vec::with_capacity(500),
+            |mut acc, city_temps| {
+                acc.extend(city_temps);
+                acc
+            },
+        );
+
+    final_city_temps
+}
+
+#[inline(always)]
+pub fn calc_min_mean_max_to_str(temps: Vec<[u8; 6]>) -> (String, String, String) {
+    let total_elements = temps.len();
+
+    let (mut min_temp, mut min_is_neg): ([u8; 3], bool) = ([57, 57, 57], false);
+    let (mut max_temp, mut max_is_neg): ([u8; 3], bool) = ([57, 57, 57], true);
+
+    let mut pos_neg_sum: [u32; 2] = [0, 0];
+
+    for temp in temps {
+        let temp = &temp[..=temp[5] as usize];
+        let is_neg = temp[0] == MINUS_AS_BYTE;
+        let temp = &temp[is_neg as usize..];
+        let dot_index = temp.len() - 2;
+
+        let msb_digit_before_dot = temp[0] - ZERO_AS_BYTE;
+        let digit_after_dot = temp[dot_index + 1] - ZERO_AS_BYTE;
+
+        match dot_index {
+            1 => {
+                let final_num = msb_digit_before_dot as u32 * 10 + digit_after_dot as u32;
+                pos_neg_sum[is_neg as usize] += final_num;
+
+                let ascii_digits = [temp[0], temp[dot_index + 1]];
+
+                min_is_neg = replace_min_if_2_ascii_float_less_than(
+                    &mut min_temp,
+                    min_is_neg,
+                    ascii_digits,
+                    is_neg,
+                );
+                max_is_neg = replace_max_if_2_ascii_float_greater_than(
+                    &mut max_temp,
+                    max_is_neg,
+                    ascii_digits,
+                    is_neg,
+                );
+            }
+            2 => {
+                let final_num = msb_digit_before_dot as u32 * 100
+                    + (temp[1] - ZERO_AS_BYTE) as u32 * 10
+                    + digit_after_dot as u32;
+                pos_neg_sum[is_neg as usize] += final_num;
+
+                let ascii_digits = [temp[0], temp[1], temp[dot_index + 1]];
+
+                min_is_neg = replace_min_if_3_ascii_float_less_than(
+                    &mut min_temp,
+                    min_is_neg,
+                    ascii_digits,
+                    is_neg,
+                );
+                max_is_neg = replace_max_if_3_ascii_float_greater_than(
+                    &mut max_temp,
+                    max_is_neg,
+                    ascii_digits,
+                    is_neg,
+                );
+            }
+            _ => unreachable!("Invalid float length"),
+        }
+    }
+
+    let calc_sum: f32 = (pos_neg_sum[0] as f32 - pos_neg_sum[1] as f32) / 10.0;
+    let mean = calc_sum / total_elements as f32;
+
+    let mut min_temp_str = String::with_capacity(4);
+    if min_is_neg {
+        min_temp_str.push('-');
+    }
+    if min_temp[0] != ZERO_AS_BYTE {
+        min_temp_str.push(min_temp[0] as char);
+    }
+    min_temp_str.push(min_temp[1] as char);
+    min_temp_str.push('.');
+    min_temp_str.push(min_temp[2] as char);
+
+    let mut max_temp_str = String::with_capacity(4);
+    if max_is_neg {
+        max_temp_str.push('-');
+    }
+    if max_temp[0] != ZERO_AS_BYTE {
+        max_temp_str.push(max_temp[0] as char);
+    }
+    max_temp_str.push(max_temp[1] as char);
+    max_temp_str.push('.');
+    max_temp_str.push(max_temp[2] as char);
+
+    (min_temp_str, format!("{mean:.1}"), max_temp_str)
 }
