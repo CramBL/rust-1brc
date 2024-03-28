@@ -15,7 +15,7 @@ fn configured_mmap_read() -> Mmap {
 
 #[inline(always)]
 fn divide_mmap_regions(mmap: &Mmap) -> Vec<(usize, usize)> {
-    const REGION_SIZE: usize = 1024 * 1024 * 500;
+    const REGION_SIZE: usize = 1024 * 1024 * 128;
     let (mut start, mut end) = (0, REGION_SIZE);
     let mut regions = Vec::with_capacity(20);
 
@@ -120,40 +120,68 @@ pub fn do_work() {
 
     let mut city_temps: Vec<Vec<([u8; 101], Vec<[u8; 6]>)>> = Vec::with_capacity(500);
 
-    for region in regions {
-        let (start, end) = region;
+    use std::thread;
+    let city_temps_region = thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(regions.len());
+        for region in regions {
+            let (start, end) = region;
+            let contents = &contents[start..end];
+            let handle = scope.spawn(|| region_worker(contents));
+            handles.push(handle);
+        }
+        let step_time = print_progress_timing(
+            &format!("Created {} threads", handles.len()),
+            step_time,
+            total_time,
+        );
 
-        let contents = &contents[start..end];
+        let mut city_temps_region: Vec<Vec<([u8; 101], Vec<[u8; 6]>)>> = Vec::with_capacity(500);
 
-        let city_temps_region = region_worker(contents);
-        step_time = print_progress_timing("processed region", step_time, total_time);
+        for handle in handles {
+            let city_temps_region_part = handle.join().unwrap();
+            city_temps_region.extend(city_temps_region_part);
+        }
+
+        let _ = print_progress_timing(
+            &format!(
+                "Joined all threads, {} city_temps_regions",
+                city_temps_region.len()
+            ),
+            step_time,
+            total_time,
+        );
 
         city_temps_region
-            .into_iter()
-            .for_each(|city_start_letter_vec| {
-                // Find if the city start letter is already in the city_start_letters
-                let city_start_letter = city_start_letter_vec[0].0[0];
-                let city_temps_idx = city_start_letters
-                    .iter()
-                    .position(|&x| x == city_start_letter);
-                if let Some(city_temps_idx) = city_temps_idx {
-                    city_start_letter_vec.into_iter().for_each(|(name, temps)| {
-                        let existing_pos = city_temps[city_temps_idx]
-                            .iter()
-                            .position(|(name_, _)| name_ == &name);
-                        if let Some(existing_pos) = existing_pos {
-                            city_temps[city_temps_idx][existing_pos].1.extend(temps);
-                        } else {
-                            city_temps[city_temps_idx].push((name, temps));
-                        }
-                    });
-                } else {
-                    city_start_letters.push(city_start_letter);
-                    city_temps.push(city_start_letter_vec);
-                }
-            });
-        step_time = print_progress_timing("Aggregated region data", step_time, total_time);
-    }
+    });
+
+    let mut step_time =
+        print_progress_timing("Continuing to aggregate all results", step_time, total_time);
+
+    city_temps_region
+        .into_iter()
+        .for_each(|city_start_letter_vec| {
+            // Find if the city start letter is already in the city_start_letters
+            let city_start_letter = city_start_letter_vec[0].0[0];
+            let city_temps_idx = city_start_letters
+                .iter()
+                .position(|&x| x == city_start_letter);
+            if let Some(city_temps_idx) = city_temps_idx {
+                city_start_letter_vec.into_iter().for_each(|(name, temps)| {
+                    let existing_pos = city_temps[city_temps_idx]
+                        .iter()
+                        .position(|(name_, _)| name_ == &name);
+                    if let Some(existing_pos) = existing_pos {
+                        city_temps[city_temps_idx][existing_pos].1.extend(temps);
+                    } else {
+                        city_temps[city_temps_idx].push((name, temps));
+                    }
+                });
+            } else {
+                city_start_letters.push(city_start_letter);
+                city_temps.push(city_start_letter_vec);
+            }
+        });
+    step_time = print_progress_timing("Aggregated region data", step_time, total_time);
     let processing_data_time = step_time.elapsed();
     let step_time = print_progress_timing("processed all data", step_time, total_time);
 

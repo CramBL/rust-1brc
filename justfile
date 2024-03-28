@@ -14,8 +14,8 @@ run-release-binary:
 
 [private]
 build-release-sequential:
-    cargo build --release --features sequential
+    cargo build --release --no-default-features --features sequential
 
 [private]
 build-release-parallel:
-    cargo build --release --features parallel
+    cargo build --release --no-default-features --features parallel
